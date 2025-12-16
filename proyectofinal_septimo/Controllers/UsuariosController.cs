@@ -7,6 +7,12 @@ using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json.Serialization;
 using System.Text.RegularExpressions;
+using System.Xml.Serialization;
+using iText.Kernel.Pdf;
+using iText.Layout;
+using iText.Layout.Element;
+using iText.Layout.Properties;
+
 
 namespace proyectofinal_septimo.Controllers
 {
@@ -179,6 +185,144 @@ namespace proyectofinal_septimo.Controllers
             });
         }
 
+
+        [HttpGet("exportar")]
+        public async Task<IActionResult> ExportarUsuarios(
+    [FromQuery] string formato,
+    [FromQuery] DateTime? fechaInicio,
+    [FromQuery] DateTime? fechaFin)
+        {
+            try
+            {
+                // 1. Timeout de seguridad (5 minutos)
+                _context.Database.SetCommandTimeout(300);
+
+                var query = _context.Usuarios.AsNoTracking().AsQueryable();
+
+                if (fechaInicio.HasValue)
+                    query = query.Where(u => u.FechaCreacion >= fechaInicio.Value);
+
+                if (fechaFin.HasValue)
+                    query = query.Where(u => u.FechaCreacion <= fechaFin.Value.AddDays(1).AddTicks(-1));
+
+                // 2. Obtener datos
+                var datos = await query
+                    .OrderByDescending(u => u.FechaCreacion)
+                    .Select(u => new UsuarioExport
+                    {
+                        Nombre = u.Nombre,
+                        Apellido = u.ApellidoPaterno,
+                        Email = u.Email,
+                        FechaRegistro = u.FechaCreacion,
+                        Estatus = u.Estatus ? "Activo" : "Inactivo"
+                    })
+                    .ToListAsync();
+
+                // 3. Validación de vacío
+                if (datos == null || datos.Count == 0)
+                {
+                    return NotFound(new { message = "No se encontraron registros en el rango de fechas seleccionado." });
+                }
+
+                byte[] archivoBytes;
+                string mimeType;
+                string nombreArchivo;
+
+                switch (formato.ToLower())
+                {
+                    case "json":
+                        var json = System.Text.Json.JsonSerializer.Serialize(datos);
+                        archivoBytes = Encoding.UTF8.GetBytes(json);
+                        mimeType = "application/json";
+                        nombreArchivo = "usuarios.json";
+                        break;
+
+                    case "xml":
+                        var xmlSerializer = new XmlSerializer(typeof(List<UsuarioExport>));
+                        using (var ms = new MemoryStream())
+                        {
+                            xmlSerializer.Serialize(ms, datos);
+                            archivoBytes = ms.ToArray();
+                        }
+                        mimeType = "application/xml";
+                        nombreArchivo = "usuarios.xml";
+                        break;
+
+                    case "csv":
+                        var sb = new StringBuilder();
+                        sb.AppendLine("Nombre,Apellido,Email,Fecha Registro,Estatus");
+                        foreach (var u in datos)
+                        {
+                            sb.AppendLine($"{u.Nombre},{u.Apellido},{u.Email},{u.FechaRegistro:yyyy-MM-dd},{u.Estatus}");
+                        }
+                        archivoBytes = Encoding.UTF8.GetBytes(sb.ToString());
+                        mimeType = "text/csv";
+                        nombreArchivo = "usuarios.csv";
+                        break;
+
+                    case "pdf":
+                        using (var ms = new MemoryStream())
+                        {
+                            var writer = new PdfWriter(ms);
+                            var pdf = new PdfDocument(writer);
+                            var document = new Document(pdf);
+
+                            // Título
+                            document.Add(new Paragraph("Reporte de Usuarios").SetFontSize(20));
+                            document.Add(new Paragraph($"Generado: {DateTime.Now}"));
+
+                            // Tabla (Usamos porcentajes para asegurar ancho correcto)
+                            // Esto requiere: using iText.Layout.Properties;
+                            var table = new Table(4);
+                            table.SetWidth(UnitValue.CreatePercentValue(100));
+
+                            // --- ENCABEZADOS (FORMA EXPLÍCITA) ---
+                            // Creamos la Celda -> Luego el Párrafo -> Luego el Texto
+                            table.AddHeaderCell(new Cell().Add(new Paragraph("Nombre")));
+                            table.AddHeaderCell(new Cell().Add(new Paragraph("Email")));
+                            table.AddHeaderCell(new Cell().Add(new Paragraph("Fecha")));
+                            table.AddHeaderCell(new Cell().Add(new Paragraph("Estado")));
+
+                            // --- DATOS ---
+                            foreach (var u in datos)
+                            {
+                                // Validamos nulos explícitamente antes de crear el párrafo
+                                string nombre = (u.Nombre ?? "") + " " + (u.Apellido ?? "");
+                                string email = u.Email ?? "Sin Email";
+                                string fecha = u.FechaRegistro.ToString("yyyy-MM-dd");
+                                string estatus = u.Estatus ?? "N/A";
+
+                                table.AddCell(new Cell().Add(new Paragraph(nombre)));
+                                table.AddCell(new Cell().Add(new Paragraph(email)));
+                                table.AddCell(new Cell().Add(new Paragraph(fecha)));
+                                table.AddCell(new Cell().Add(new Paragraph(estatus)));
+                            }
+
+                            document.Add(table);
+                            document.Close();
+                            archivoBytes = ms.ToArray();
+                        }
+                        mimeType = "application/pdf";
+                        nombreArchivo = "usuarios.pdf";
+                        break;
+
+                    default:
+                        return BadRequest("Formato no soportado");
+                }
+
+                return File(archivoBytes, mimeType, nombreArchivo);
+            }
+            catch (Exception ex)
+            {
+               
+
+                // Esto imprimirá el error real en la ventana "Salida" (Output) de Visual Studio
+                System.Diagnostics.Debug.WriteLine("ERROR PDF: " + ex.ToString());
+
+                return StatusCode(500, $"Error interno: {ex.Message}");
+            }
+        }
+
         // --- FUNCIONES PRIVADAS / CLASES AUXILIARES (ORIGINALES) ---
 
         private string EncriptarPassword(string textoPlano)
@@ -212,5 +356,14 @@ namespace proyectofinal_septimo.Controllers
             [JsonPropertyName("tokenId")]
             public string TokenId { get; set; }
         }
+    }
+
+    public class UsuarioExport
+    {
+        public string Nombre { get; set; }
+        public string Apellido { get; set; }
+        public string Email { get; set; }
+        public DateTime FechaRegistro { get; set; }
+        public string Estatus { get; set; } // Lo cambié a string para que en el XML salga "Activo" directo
     }
 }
